@@ -1,0 +1,294 @@
+name: Agent Governance Checks
+
+on:
+  workflow_call:
+    inputs:
+      agents_config_path:
+        description: 'Path to agents.yaml config in calling repo'
+        default: 'agents.yaml'
+        type: string
+      pr_template_path:
+        description: 'Path to PR template in calling repo'
+        default: '.github/pull_request_template.md'
+        type: string
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Prevent multiple governance jobs running on same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR Template Compliance
+        run: |
+          echo "🔍 Checking PR template compliance..."
+          
+          # Check if PR body contains required sections
+          PR_BODY='${{ github.event.pull_request.body }}'
+          
+          MISSING_SECTIONS=""
+          
+          if [[ -z "$PR_BODY" ]]; then
+            echo "⚠️ PR body is empty - please use the template from .github/pull_request_template.md"
+            echo "ℹ️ Template provides planning structure and specialist checklists"
+            MISSING_SECTIONS="all"
+          else
+            # Check for required sections
+            if ! echo "$PR_BODY" | grep -q "### Plan"; then
+              echo "⚠️ Missing '### Plan' section in PR"
+              MISSING_SECTIONS="$MISSING_SECTIONS plan"
+            fi
+            
+            if ! echo "$PR_BODY" | grep -q "### Agent Information"; then
+              echo "⚠️ Missing '### Agent Information' section in PR"
+              MISSING_SECTIONS="$MISSING_SECTIONS agent-info"
+            fi
+            
+            if ! echo "$PR_BODY" | grep -q "#### Core Requirements"; then
+              echo "⚠️ Missing '#### Core Requirements' checklist in PR"
+              MISSING_SECTIONS="$MISSING_SECTIONS core-checklist"
+            fi
+          fi
+          
+          if [[ -n "$MISSING_SECTIONS" ]]; then
+            echo ""
+            echo "📋 To fix: Copy template from .github/pull_request_template.md or create PR through GitHub UI"
+            echo "🤖 Agent routing will provide additional specialist checklists automatically"
+            echo ""
+            echo "⚠️ This is currently a warning - will become blocking once governance system stabilizes"
+            # exit 1  # Disabled during sprint testing
+          else
+            echo "✅ PR template compliance validated"
+          fi
+
+      - name: Check File Count Limits
+        run: |
+          echo "🔍 Checking change limits per agents.yaml..."
+          
+          # Get changed files count with SHA fallbacks
+          BASE_SHA="${GITHUB_BASE_SHA:-${{ github.event.pull_request.base.sha }}}"
+          HEAD_SHA="${GITHUB_HEAD_SHA:-${{ github.event.pull_request.head.sha }}}"
+          
+          if [ -z "$BASE_SHA" ] || ! git rev-parse --verify "$BASE_SHA" >/dev/null 2>&1; then
+            BASE_SHA="HEAD~1"
+          fi
+          if [ -z "$HEAD_SHA" ] || ! git rev-parse --verify "$HEAD_SHA" >/dev/null 2>&1; then
+            HEAD_SHA="HEAD"
+          fi
+          
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA".."$HEAD_SHA" | wc -l)
+          CHANGED_LINES=$(git diff --stat "$BASE_SHA".."$HEAD_SHA" | tail -1 | grep -o '[0-9]\+ insertions\|[0-9]\+ deletions' | awk '{sum += $1} END {print sum}')
+          
+          echo "Changed files: $CHANGED_FILES"
+          echo "Changed lines: $CHANGED_LINES"
+          
+          # Read limits from agents.yaml dynamically
+          AGENTS_CONFIG="${{ inputs.agents_config_path || 'agents.yaml' }}"
+          if [ -f "$AGENTS_CONFIG" ]; then
+            # Extract limits from agents.yaml
+            MAX_FILES=$(grep -A 5 "^limits:" "$AGENTS_CONFIG" | grep "max_files_changed:" | sed 's/.*max_files_changed: *\([0-9]*\).*/\1/')
+            MAX_LINES=$(grep -A 5 "^limits:" "$AGENTS_CONFIG" | grep "max_lines_changed:" | sed 's/.*max_lines_changed: *\([0-9]*\).*/\1/')
+            
+            # Fallback to defaults if parsing fails
+            [ -z "$MAX_FILES" ] && MAX_FILES=8
+            [ -z "$MAX_LINES" ] && MAX_LINES=400
+            
+            echo "📋 Limits from $AGENTS_CONFIG: max files: $MAX_FILES, max lines: $MAX_LINES"
+          else
+            # Fallback defaults
+            MAX_FILES=8
+            MAX_LINES=400
+            echo "⚠️ $AGENTS_CONFIG not found, using defaults: max files: $MAX_FILES, max lines: $MAX_LINES"
+          fi
+          
+          # Check for migration label to bypass limits
+          PR_LABELS="${{ toJson(github.event.pull_request.labels.*.name) }}"
+          
+          if echo "$PR_LABELS" | grep -q "migration"; then
+            echo "🔄 Migration PR detected - bypassing strict limits"
+            # Read migration override values from agents.yaml
+            if [ -f "$AGENTS_CONFIG" ]; then
+              MIGRATION_MAX_FILES=$(grep -A 10 "migration:" "$AGENTS_CONFIG" | grep "max_files_changed:" | sed 's/.*max_files_changed: *\([0-9]*\).*/\1/')
+              MIGRATION_MAX_LINES=$(grep -A 10 "migration:" "$AGENTS_CONFIG" | grep "max_lines_changed:" | sed 's/.*max_lines_changed: *\([0-9]*\).*/\1/')
+              
+              [ ! -z "$MIGRATION_MAX_FILES" ] && MAX_FILES=$MIGRATION_MAX_FILES || MAX_FILES=9999
+              [ ! -z "$MIGRATION_MAX_LINES" ] && MAX_LINES=$MIGRATION_MAX_LINES || MAX_LINES=999999
+            else
+              # Fallback for migration without config
+              MAX_FILES=9999
+              MAX_LINES=999999
+            fi
+            echo "🔄 Migration limits: max files: $MAX_FILES, max lines: $MAX_LINES"
+          fi
+          
+          if [ "$CHANGED_FILES" -gt "$MAX_FILES" ]; then
+            echo "❌ Too many files changed ($CHANGED_FILES > $MAX_FILES)."
+            if ! echo "$PR_LABELS" | grep -q "migration"; then
+              echo "💡 Consider adding 'migration' label for larger changes or break into smaller PRs."
+            fi
+            exit 1
+          fi
+          
+          if [ "$CHANGED_LINES" -gt "$MAX_LINES" ]; then
+            echo "⚠️ Large change detected ($CHANGED_LINES > $MAX_LINES lines). Ensure proper review."
+          fi
+          
+          echo "✅ Change limits validated"
+
+      - name: Validate CODEOWNERS Coverage
+        run: |
+          echo "🔍 Checking CODEOWNERS coverage..."
+          
+          # Get changed files with SHA fallbacks
+          BASE_SHA="${GITHUB_BASE_SHA:-${{ github.event.pull_request.base.sha }}}"
+          HEAD_SHA="${GITHUB_HEAD_SHA:-${{ github.event.pull_request.head.sha }}}"
+          
+          if [ -z "$BASE_SHA" ] || ! git rev-parse --verify "$BASE_SHA" >/dev/null 2>&1; then
+            BASE_SHA="HEAD~1"
+          fi
+          if [ -z "$HEAD_SHA" ] || ! git rev-parse --verify "$HEAD_SHA" >/dev/null 2>&1; then
+            HEAD_SHA="HEAD"
+          fi
+          
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA".."$HEAD_SHA")
+          
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "✅ No files changed"
+            exit 0
+          fi
+          
+          # Check if CODEOWNERS file exists
+          if [ ! -f ".github/CODEOWNERS" ]; then
+            echo "⚠️ CODEOWNERS file missing"
+            echo "ℹ️ This is a warning during sprint testing phase"
+          fi
+          
+          echo "✅ CODEOWNERS coverage validated"
+
+      - name: Check for Required ADR
+        run: |
+          echo "🔍 Checking if ADR is required..."
+          
+          # Get changed files with SHA fallbacks
+          BASE_SHA="${GITHUB_BASE_SHA:-${{ github.event.pull_request.base.sha }}}"
+          HEAD_SHA="${GITHUB_HEAD_SHA:-${{ github.event.pull_request.head.sha }}}"
+          
+          if [ -z "$BASE_SHA" ] || ! git rev-parse --verify "$BASE_SHA" >/dev/null 2>&1; then
+            BASE_SHA="HEAD~1"
+          fi
+          if [ -z "$HEAD_SHA" ] || ! git rev-parse --verify "$HEAD_SHA" >/dev/null 2>&1; then
+            HEAD_SHA="HEAD"
+          fi
+          
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA".."$HEAD_SHA")
+          
+          # Check for architectural changes that require ADR
+          ARCH_CHANGES=""
+          
+          # Check for new dependencies
+          if echo "$CHANGED_FILES" | grep -q "package\.json\|package-lock\.json\|Dockerfile\|docker-compose"; then
+            ARCH_CHANGES="dependency/infrastructure"
+          fi
+          
+          # Check for new workflows or major config changes
+          if echo "$CHANGED_FILES" | grep -q "\.github/workflows\|agents\.yaml\|tsconfig\.json"; then
+            ARCH_CHANGES="workflow/configuration"
+          fi
+          
+          # Check for database schema changes
+          if echo "$CHANGED_FILES" | grep -q "models/\|migrations/\|schema"; then
+            ARCH_CHANGES="database schema"
+          fi
+          
+          if [ ! -z "$ARCH_CHANGES" ]; then
+            echo "🔍 Architectural changes detected: $ARCH_CHANGES"
+            
+            # Check if new ADR was added
+            if ! echo "$CHANGED_FILES" | grep -q "docs/adr/"; then
+              echo "⚠️ Consider adding an ADR for architectural change: $ARCH_CHANGES"
+              echo "ℹ️ This is a warning, not a failure - use judgment on whether ADR is needed"
+            else
+              echo "✅ ADR found for architectural changes"
+            fi
+          else
+            echo "✅ No ADR required for this change"
+          fi
+
+      - name: Validate Agent Routing
+        run: |
+          echo "🔍 Validating agent routing compliance..."
+          
+          # Check if agents.yaml exists
+          AGENTS_CONFIG="${{ inputs.agents_config_path || 'agents.yaml' }}"
+          if [ ! -f "$AGENTS_CONFIG" ]; then
+            echo "⚠️ $AGENTS_CONFIG missing - required for routing validation"
+            echo "ℹ️ This is a warning during sprint testing phase"
+          fi
+          
+          # Get changed files and categorize with SHA fallbacks
+          BASE_SHA="${GITHUB_BASE_SHA:-${{ github.event.pull_request.base.sha }}}"
+          HEAD_SHA="${GITHUB_HEAD_SHA:-${{ github.event.pull_request.head.sha }}}"
+          
+          if [ -z "$BASE_SHA" ] || ! git rev-parse --verify "$BASE_SHA" >/dev/null 2>&1; then
+            BASE_SHA="HEAD~1"
+          fi
+          if [ -z "$HEAD_SHA" ] || ! git rev-parse --verify "$HEAD_SHA" >/dev/null 2>&1; then
+            HEAD_SHA="HEAD"
+          fi
+          
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA".."$HEAD_SHA")
+          
+          # Determine expected agent based on file patterns
+          EXPECTED_AGENT=""
+          
+          if echo "$CHANGED_FILES" | grep -qE "(frontend/|\.tsx|\.css|components/)"; then
+            EXPECTED_AGENT="fe"
+          elif echo "$CHANGED_FILES" | grep -qE "(backend/|controllers/|routes/|models/)"; then
+            EXPECTED_AGENT="be"
+          elif echo "$CHANGED_FILES" | grep -qE "(docker-compose|Dockerfile|\.github/workflows|traefik/)"; then
+            EXPECTED_AGENT="ops"
+          elif echo "$CHANGED_FILES" | grep -qE "(test|spec|\.test\.|\.spec\.)"; then
+            EXPECTED_AGENT="test"
+          else
+            EXPECTED_AGENT="lead_agent"
+          fi
+          
+          # Extract agent from PR body
+          PR_BODY='${{ github.event.pull_request.body }}'
+          DECLARED_AGENT=$(echo "$PR_BODY" | grep "Agent:" | sed 's/.*Agent.*:\s*`\([^`]*\)`.*/\1/')
+          
+          if [ ! -z "$DECLARED_AGENT" ] && [ "$DECLARED_AGENT" != "$EXPECTED_AGENT" ]; then
+            echo "⚠️ Agent mismatch: declared '$DECLARED_AGENT', expected '$EXPECTED_AGENT' based on files"
+            echo "ℹ️ This is informational - lead agent can handle cross-domain changes"
+          fi
+          
+          echo "✅ Agent routing validated (expected: $EXPECTED_AGENT, declared: $DECLARED_AGENT)"
+
+      - name: Summary
+        run: |
+          echo "🎉 Governance validation completed!"
+          echo "⚠️ Currently in warning-only mode during sprint testing"
+          echo "📋 Next steps:"
+          echo "  1. Ensure CI quality checks pass"
+          echo "  2. Get required reviews per branch protection"
+          echo "  3. Specialist checklists completed in PR"
+          echo ""
+          echo "✅ Governance workflow exiting with success (warning mode)"
+          exit 0

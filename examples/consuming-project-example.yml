@@ -1,0 +1,31 @@
+# Example: How to use this governance system in your project
+# Place this file at: .github/workflows/governance.yml in your project repo
+
+name: Project Governance
+
+on:
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  governance:
+    uses: your-org/governance-workflows/.github/workflows/governance.yml@main
+    with:
+      # Path to your project's agents.yaml config (optional, defaults to 'agents.yaml')
+      agents_config_path: 'agents.yaml'
+      # Path to your project's PR template (optional, defaults to '.github/pull_request_template.md')
+      pr_template_path: '.github/pull_request_template.md'
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# What this gives you:
+# ✅ Automatic agent routing based on changed files
+# ✅ PR template compliance checking  
+# ✅ Change limits enforcement (configurable per project)
+# ✅ Specialist domain validations (frontend, backend, database, infrastructure)
+# ✅ Rich PR comments with routing results and checklists
+# ✅ Warning mode during initial rollout (non-blocking)
+
+# Required files in your project:
+# 1. agents.yaml - Agent configuration and routing rules
+# 2. .github/pull_request_template.md - Structured PR template (optional, will use template from governance repo if missing)

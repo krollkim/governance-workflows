@@ -1,0 +1,85 @@
+# Machine‑readable agent registry + pattern switch
+active_pattern: orchestrator
+
+limits:
+  max_files_changed: 30
+  max_lines_changed: 800
+  context_tokens_soft_cap: 60000
+  # Migration PRs can be larger - use 'migration' label to bypass strict limits
+  allow_overrides:
+    labels:
+      - migration
+  # Explicit override rules for migration
+  overrides:
+    migration:
+      max_files_changed: 9999
+      max_lines_changed: 999999
+
+routing:
+  heuristics:
+    - if: "touches /frontend or .tsx or .css or components"
+      to: fe
+    - if: "touches /backend or controllers or routes or models"
+      to: be
+    - if: "touches /db or migrations or backups"
+      to: db
+    - if: "touches /traefik or docker-compose or Dockerfile or ci"
+      to: ops
+    - if: "only tests/docs changed"
+      to: test
+
+agents:
+  lead_agent:
+    id: lead_agent
+    name: Claude
+    role: Senior Lead Developer
+    permissions: [read, propose_diff, open_pr, comment, request_reviews]
+    owners: [kim]
+    tools: [ide_edit, terminal_readonly, run_tests, linter]
+
+  fe:
+    name: Frontend Expert
+    domains: [ui, react, next, a11y, perf]
+    rules:
+      - follow design tokens at /ui/tokens.json
+      - keep components isolated; add stories
+
+  be:
+    name: Backend Expert
+    domains: [node, express, typescript, api, logging]
+    rules:
+      - update /docs/api.yaml first (source of truth)
+      - structured errors & observability
+
+  db:
+    name: Database Expert
+    domains: [schema, migrations, performance]
+    rules:
+      - forward‑only migrations; plan zero‑downtime
+
+  ops:
+    name: Infrastructure Expert
+    domains: [docker, traefik, aws, ci_cd]
+    rules:
+      - immutable images; healthchecks; least privilege
+
+  test:
+    name: Test Agent
+    domains: [unit, integ, e2e]
+    rules:
+      - reproduce failing case; measure coverage
+
+patterns:
+  single_agent:
+    description: single orchestrator does all work
+  lead_specialists:
+    description: lead delegates to specialists and reviews
+  peer_to_peer:
+    description: specialists can initiate PRs & request mutual reviews
+  pipeline:
+    stages: [spec, codegen, test, doc]
+  swarm:
+    events:
+      - name: nightly_maintenance
+        actions: [lint_fix, dep_bump, typecheck]
+        branch: chore/bot/maintenance

@@ -1,0 +1,100 @@
+name: Agent Routing
+
+on:
+  workflow_call:
+    inputs:
+      agents_config_path:
+        description: 'Path to agents.yaml config in calling repo'
+        default: 'agents.yaml'
+        type: string
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+  pull_request:
+    types: [opened, synchronize]
+    branches: [ main, dev ]
+
+jobs:
+  route-agents:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          npm install js-yaml
+
+      - name: Copy agents config if different path
+        run: |
+          if [ "${{ inputs.agents_config_path || 'agents.yaml' }}" != "agents.yaml" ]; then
+            cp "${{ inputs.agents_config_path || 'agents.yaml' }}" agents.yaml
+          fi
+
+      - name: Route agents and generate comment
+        id: routing
+        env:
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GENERATE_COMMENT: true
+          AGENTS_CONFIG_PATH: ${{ inputs.agents_config_path || 'agents.yaml' }}
+        run: |
+          echo "🤖 Running agent routing..."
+          echo "Using agents config: $AGENTS_CONFIG_PATH"
+          
+          # Run agent router and capture output
+          COMMENT_BODY=$(node scripts/agent-router.js)
+          
+          # Save to GitHub output
+          echo "comment-body<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post routing comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commentBody = process.env.COMMENT_BODY;
+            
+            // Check if routing comment already exists
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const existingComment = comments.data.find(comment => 
+              comment.body.includes('🤖 Agent Routing Results')
+            );
+            
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody
+              });
+              console.log('✅ Updated existing agent routing comment');
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+              console.log('✅ Created new agent routing comment');
+            }
+        env:
+          COMMENT_BODY: ${{ steps.routing.outputs.comment-body }}

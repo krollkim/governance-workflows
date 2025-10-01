@@ -1,0 +1,42 @@
+name: Complete Agent Governance
+
+on:
+  workflow_call:
+    inputs:
+      agents_config_path:
+        description: 'Path to agents.yaml config in calling repo'
+        default: 'agents.yaml'
+        type: string
+      pr_template_path:
+        description: 'Path to PR template in calling repo'
+        default: '.github/pull_request_template.md'
+        type: string
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+
+jobs:
+  # Run agent routing to determine specialists and post PR comment
+  agent-routing:
+    uses: ./.github/workflows/agent-routing.yml
+    with:
+      agents_config_path: ${{ inputs.agents_config_path }}
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Run governance validation (template compliance, limits, etc.)
+  governance-validation:
+    uses: ./.github/workflows/agent-governance.yml
+    with:
+      agents_config_path: ${{ inputs.agents_config_path }}
+      pr_template_path: ${{ inputs.pr_template_path }}
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Run specialist domain enforcement
+  specialist-enforcement:
+    uses: ./.github/workflows/specialist-enforcement.yml
+    with:
+      agents_config_path: ${{ inputs.agents_config_path }}
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

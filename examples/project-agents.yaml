@@ -1,0 +1,103 @@
+# Example agents.yaml for a consuming project
+# Customize this for your project's specific needs
+
+active_pattern: lead_specialists
+
+limits:
+  # Adjust these limits based on your project size and team preferences
+  max_files_changed: 20          # Smaller projects might use 10-15
+  max_lines_changed: 600         # Adjust based on typical change size
+  context_tokens_soft_cap: 50000 # For AI-assisted development
+  
+  # Migration PRs can bypass limits with 'migration' label
+  allow_overrides:
+    labels:
+      - migration
+      - hotfix                   # Emergency fixes
+  
+  overrides:
+    migration:
+      max_files_changed: 9999
+      max_lines_changed: 999999
+    hotfix:
+      max_files_changed: 5       # Keep hotfixes small
+      max_lines_changed: 200
+
+routing:
+  heuristics:
+    # Customize these patterns for your project structure
+    - if: "touches /src/components or .tsx or .css or /stories"
+      to: fe
+    - if: "touches /api or /server or controllers or routes"  
+      to: be
+    - if: "touches /prisma or migrations or /database"
+      to: db
+    - if: "touches /docker or .yml or /deploy or /infra"
+      to: ops
+    - if: "touches /tests or .test. or .spec. or /cypress"
+      to: test
+
+agents:
+  lead_agent:
+    id: lead_agent
+    name: Claude
+    role: Senior Lead Developer
+    permissions: [read, propose_diff, open_pr, comment, request_reviews]
+    owners: [your-username]  # Replace with your GitHub username
+    tools: [ide_edit, terminal_readonly, run_tests, linter]
+
+  fe:
+    name: Frontend Expert
+    domains: [react, nextjs, typescript, css, accessibility, performance]
+    rules:
+      - follow design system at /src/design-tokens
+      - maintain Storybook stories for new components
+      - ensure accessibility compliance (WCAG 2.1 AA)
+
+  be:
+    name: Backend Expert  
+    domains: [nodejs, express, typescript, api_design, security]
+    rules:
+      - update OpenAPI spec first (design-first approach)
+      - structured logging with correlation IDs
+      - input validation and rate limiting
+
+  db:
+    name: Database Expert
+    domains: [postgresql, prisma, migrations, performance]
+    rules:
+      - zero-downtime migrations only
+      - include rollback plan
+      - performance impact assessment
+
+  ops:
+    name: Infrastructure Expert
+    domains: [docker, kubernetes, ci_cd, monitoring]
+    rules:
+      - immutable deployments
+      - health checks required
+      - secrets via environment, never hardcoded
+
+  test:
+    name: Test Specialist
+    domains: [unit_testing, integration, e2e, tdd]
+    rules:
+      - test coverage must not decrease
+      - e2e tests for critical user flows
+      - follow AAA pattern (Arrange, Act, Assert)
+
+patterns:
+  lead_specialists:
+    description: Lead orchestrates, specialists validate their domains
+    workflow: lead delegates → specialists review → lead approves
+  
+  # Alternative patterns you can switch to:
+  single_agent:
+    description: One agent handles everything (for small projects)
+  
+  peer_to_peer:
+    description: Specialists can initiate and cross-review
+    
+  pipeline:
+    description: Sequential stages with gates
+    stages: [planning, implementation, testing, documentation]
