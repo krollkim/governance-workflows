@@ -1,0 +1,44 @@
+{
+  "name": "governance-workflows",
+  "version": "1.0.0",
+  "description": "Reusable agent governance system for software development projects",
+  "main": "scripts/agent-router.js",
+  "scripts": {
+    "orchestrator": "npx ts-node tools/orchestrator.ts",
+    "router": "node scripts/agent-router.js",
+    "validate:config": "node -e \"const yaml = require('js-yaml'); const fs = require('fs'); try { yaml.load(fs.readFileSync('agents.yaml', 'utf8')); console.log('✅ agents.yaml is valid'); } catch(e) { console.error('❌ agents.yaml validation failed:', e.message); process.exit(1); }\"",
+    "docs:generate": "echo 'Documentation generation - implement based on project needs'",
+    "test": "echo 'Tests - implement based on project needs'"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.5",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "governance",
+    "agents",
+    "workflow",
+    "automation",
+    "github-actions",
+    "code-review",
+    "quality-assurance"
+  ],
+  "author": "Your Organization",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/governance-workflows.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/governance-workflows/issues"
+  },
+  "homepage": "https://github.com/your-org/governance-workflows#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

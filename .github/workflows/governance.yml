@@ -11,6 +11,14 @@ on:
         description: 'Path to PR template in calling repo'
         default: '.github/pull_request_template.md'
         type: string
+      enable_ai_execution:
+        description: 'Enable AI agent execution (requires execute-agents label)'
+        default: false
+        type: boolean
+      ai_execution_mode:
+        description: 'AI execution mode: simulate, execute, or interactive'
+        default: 'simulate'
+        type: string
     secrets:
       GITHUB_TOKEN:
         required: true
@@ -38,5 +46,19 @@ jobs:
     uses: ./.github/workflows/specialist-enforcement.yml
     with:
       agents_config_path: ${{ inputs.agents_config_path }}
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Execute AI agents if enabled and execute-agents label is present
+  ai-agent-execution:
+    if: >
+      inputs.enable_ai_execution && 
+      contains(github.event.pull_request.labels.*.name, 'execute-agents')
+    needs: [agent-routing, governance-validation, specialist-enforcement]
+    uses: ./.github/workflows/ai-agent-execution.yml
+    with:
+      agents_config_path: ${{ inputs.agents_config_path }}
+      user_request: ${{ github.event.pull_request.title }}
+      execution_mode: ${{ inputs.ai_execution_mode }}
     secrets:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

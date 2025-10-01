@@ -1,0 +1,170 @@
+name: AI Agent Execution
+
+on:
+  workflow_call:
+    inputs:
+      agents_config_path:
+        description: 'Path to agents.yaml config in calling repo'
+        default: 'agents.yaml'
+        type: string
+      user_request:
+        description: 'Task description for AI agents'
+        required: true
+        type: string
+      execution_mode:
+        description: 'Execution mode: simulate, execute, or interactive'
+        default: 'simulate'
+        type: string
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+  
+  # Can also be triggered manually with a PR comment
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+
+jobs:
+  ai-agent-execution:
+    # Only run on PR comments that start with "/execute-agents"
+    if: >
+      github.event_name == 'workflow_call' || 
+      (github.event.issue.pull_request && 
+       startsWith(github.event.comment.body, '/execute-agents'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract execution request from comment
+        if: github.event_name == 'issue_comment'
+        id: extract-request
+        run: |
+          COMMENT_BODY="${{ github.event.comment.body }}"
+          USER_REQUEST=$(echo "$COMMENT_BODY" | sed 's|^/execute-agents\s*||' | sed 's|^[[:space:]]*||')
+          
+          if [ -z "$USER_REQUEST" ]; then
+            USER_REQUEST="Analyze project and provide recommendations"
+          fi
+          
+          echo "user-request=$USER_REQUEST" >> $GITHUB_OUTPUT
+          echo "execution-mode=simulate" >> $GITHUB_OUTPUT
+
+      - name: Checkout calling repository
+        uses: actions/checkout@v4
+        with:
+          # For PR comments, checkout the PR branch
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Checkout governance workflows
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/governance-workflows
+          path: .governance
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install governance dependencies
+        run: |
+          cd .governance
+          npm install
+
+      - name: Copy agents config to governance directory
+        run: |
+          AGENTS_CONFIG="${{ inputs.agents_config_path || 'agents.yaml' }}"
+          if [ -f "$AGENTS_CONFIG" ]; then
+            cp "$AGENTS_CONFIG" .governance/agents.yaml
+            echo "✅ Copied $AGENTS_CONFIG to governance directory"
+          else
+            echo "⚠️ No agents.yaml found, using default configuration"
+            # Use the default agents.yaml from governance repo
+          fi
+
+      - name: Execute AI agents
+        id: execute
+        env:
+          DEBUG: ${{ runner.debug == '1' && '1' || '0' }}
+          EXECUTION_MODE: ${{ inputs.execution_mode || steps.extract-request.outputs.execution-mode || 'simulate' }}
+        run: |
+          cd .governance
+          
+          USER_REQUEST="${{ inputs.user_request || steps.extract-request.outputs.user-request || 'Analyze project structure and provide recommendations' }}"
+          echo "🤖 Executing AI agents with request: $USER_REQUEST"
+          echo "🔧 Execution mode: $EXECUTION_MODE"
+          
+          # Execute the orchestrator and capture output
+          OUTPUT=$(npm run orchestrator "$USER_REQUEST" 2>&1)
+          EXIT_CODE=$?
+          
+          echo "orchestrator-output<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "exit-code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ AI agents executed successfully"
+          else
+            echo "❌ AI agents execution failed with code $EXIT_CODE"
+          fi
+
+      - name: Post execution summary comment
+        if: github.event.issue.pull_request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = process.env.ORCHESTRATOR_OUTPUT;
+            const exitCode = process.env.EXIT_CODE;
+            const userRequest = process.env.USER_REQUEST;
+            const executionMode = process.env.EXECUTION_MODE;
+            
+            const success = exitCode === '0';
+            const emoji = success ? '✅' : '❌';
+            const status = success ? 'completed successfully' : 'failed';
+            
+            const comment = `## ${emoji} AI Agent Execution ${status.charAt(0).toUpperCase() + status.slice(1)}
+
+**Request**: ${userRequest}
+**Mode**: \`${executionMode}\`
+**Status**: ${status}
+
+### Execution Output
+\`\`\`
+${output}
+\`\`\`
+
+---
+*Triggered by [comment](${context.payload.comment.html_url}) from @${context.payload.comment.user.login}*`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+        env:
+          ORCHESTRATOR_OUTPUT: ${{ steps.execute.outputs.orchestrator-output }}
+          EXIT_CODE: ${{ steps.execute.outputs.exit-code }}
+          USER_REQUEST: ${{ inputs.user_request || steps.extract-request.outputs.user-request }}
+          EXECUTION_MODE: ${{ inputs.execution_mode || steps.extract-request.outputs.execution-mode }}
+
+      - name: Fail job if agents failed
+        if: steps.execute.outputs.exit-code != '0'
+        run: |
+          echo "❌ AI agent execution failed"
+          exit 1
+
+      - name: Create agent execution artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-execution-logs
+          path: |
+            .governance/docs/agents/*.md
+          retention-days: 30

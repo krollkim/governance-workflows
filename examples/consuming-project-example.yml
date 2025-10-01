@@ -6,15 +6,32 @@ name: Project Governance
 on:
   pull_request:
     branches: [ main, dev ]
+  issue_comment:
+    types: [created]
 
 jobs:
+  # Main governance workflow (always runs on PRs)
   governance:
+    if: github.event_name == 'pull_request'
     uses: your-org/governance-workflows/.github/workflows/governance.yml@main
     with:
       # Path to your project's agents.yaml config (optional, defaults to 'agents.yaml')
       agents_config_path: 'agents.yaml'
       # Path to your project's PR template (optional, defaults to '.github/pull_request_template.md')
       pr_template_path: '.github/pull_request_template.md'
+      # Enable AI agent execution (requires 'execute-agents' label on PR)
+      enable_ai_execution: true
+      # AI execution mode: 'simulate' (safe), 'execute' (makes changes), 'interactive' (asks for approval)
+      ai_execution_mode: 'simulate'
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # AI agent execution via PR comments
+  ai-agents-on-demand:
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/execute-agents')
+    uses: your-org/governance-workflows/.github/workflows/ai-agent-execution.yml@main
+    with:
+      agents_config_path: 'agents.yaml'
     secrets:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -24,7 +41,13 @@ jobs:
 # ✅ Change limits enforcement (configurable per project)
 # ✅ Specialist domain validations (frontend, backend, database, infrastructure)
 # ✅ Rich PR comments with routing results and checklists
+# ✅ AI agent execution on-demand via PR comments or labels
 # ✅ Warning mode during initial rollout (non-blocking)
+
+# How to use AI agents:
+# 1. Add 'execute-agents' label to PR for automatic execution
+# 2. Comment "/execute-agents analyze database performance" for specific tasks
+# 3. Use EXECUTION_MODE=execute in agents.yaml for real changes (be careful!)
 
 # Required files in your project:
 # 1. agents.yaml - Agent configuration and routing rules
