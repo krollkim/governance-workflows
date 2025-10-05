@@ -2,9 +2,26 @@
   "name": "governance-workflows",
   "version": "1.0.0",
   "description": "Reusable agent governance system for software development projects",
-  "main": "scripts/agent-router.js",
+  "main": "dist/tools/orchestrator.js",
+  "types": "dist/tools/orchestrator.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/tools/orchestrator.js",
+      "require": "./dist/tools/orchestrator.js",
+      "types": "./dist/tools/orchestrator.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "prompts/",
+    "docs/agents/",
+    "agents.yaml"
+  ],
   "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "orchestrator": "npx ts-node tools/orchestrator.ts",
+    "orchestrator:prod": "node dist/tools/orchestrator.js",
     "router": "node scripts/agent-router.js",
     "validate:config": "node -e \"const yaml = require('js-yaml'); const fs = require('fs'); try { yaml.load(fs.readFileSync('agents.yaml', 'utf8')); console.log('✅ agents.yaml is valid'); } catch(e) { console.error('❌ agents.yaml validation failed:', e.message); process.exit(1); }\"",
     "docs:generate": "echo 'Documentation generation - implement based on project needs'",
