@@ -1245,4 +1245,5 @@ if (require.main === module) {
   RuntimeOrchestrator.cli().catch(console.error);
 }
 
-export = RuntimeOrchestrator;
+export { RuntimeOrchestrator };
+export default RuntimeOrchestrator;
