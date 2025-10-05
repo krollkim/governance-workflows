@@ -19,9 +19,6 @@ on:
         description: 'AI execution mode: simulate, execute, or interactive'
         default: 'simulate'
         type: string
-    secrets:
-      GITHUB_TOKEN:
-        required: true
 
 jobs:
   # Run agent routing to determine specialists and post PR comment
@@ -29,8 +26,7 @@ jobs:
     uses: ./.github/workflows/agent-routing.yml
     with:
       agents_config_path: ${{ inputs.agents_config_path }}
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
 
   # Run governance validation (template compliance, limits, etc.)
   governance-validation:
@@ -38,16 +34,14 @@ jobs:
     with:
       agents_config_path: ${{ inputs.agents_config_path }}
       pr_template_path: ${{ inputs.pr_template_path }}
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
 
   # Run specialist domain enforcement
   specialist-enforcement:
     uses: ./.github/workflows/specialist-enforcement.yml
     with:
       agents_config_path: ${{ inputs.agents_config_path }}
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
 
   # Optional: Execute AI agents if enabled and execute-agents label is present
   ai-agent-execution:
@@ -60,5 +54,4 @@ jobs:
       agents_config_path: ${{ inputs.agents_config_path }}
       user_request: ${{ github.event.pull_request.title }}
       execution_mode: ${{ inputs.ai_execution_mode }}
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit

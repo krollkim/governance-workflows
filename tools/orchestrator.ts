@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 import { spawn } from 'child_process';
+import Anthropic from '@anthropic-ai/sdk';
 
 // ANSI color codes for terminal output
 const colors = {
@@ -71,12 +72,19 @@ class RuntimeOrchestrator {
   private session: OrchestratorSession;
   private debug: boolean;
   private executionMode: 'simulate' | 'execute' | 'interactive';
+  private anthropic: Anthropic;
 
   constructor() {
     this.debug = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
     // Execution mode: 'simulate' | 'execute' | 'interactive' 
     this.executionMode = (process.env.EXECUTION_MODE as any) || 'simulate';
     this.agentsConfig = this.loadAgentsConfig();
+    
+    // Initialize AI integration
+    this.anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY || '',
+    });
+    
     this.session = {
       sessionId: Date.now().toString(),
       userRequest: '',
@@ -446,25 +454,368 @@ Tasks will be executed in sequence, with each specialist agent handling their do
 
     switch (task.agent) {
       case 'db':
-        return await this.executeDatabaseTask(task);
+        return await this.callAIAgent('database-expert', task);
       
       case 'be':
-        return await this.executeBackendTask(task);
+        return await this.callAIAgent('backend-expert', task);
       
       case 'fe':
-        return await this.executeFrontendTask(task);
+        return await this.callAIAgent('frontend-expert', task);
       
       case 'ops':
-        return await this.executeInfrastructureTask(task);
+        return await this.callAIAgent('infrastructure-expert', task);
       
       case 'test':
-        return await this.executeTestTask(task);
+        return await this.callAIAgent('test-expert', task);
       
       case 'lead':
-        return await this.executeLeadTask(task);
+        return await this.executeLeadTask(task); // Keep lead agent as-is for now
       
       default:
         throw new Error(`Unknown agent: ${task.agent}`);
+    }
+  }
+
+  /**
+   * Call AI agent using Anthropic SDK and prompt templates
+   */
+  private async callAIAgent(agentTemplate: string, task: AgentTask): Promise<TaskResult> {
+    try {
+      // Check for API key
+      if (!process.env.ANTHROPIC_API_KEY) {
+        this.log(`⚠️  No ANTHROPIC_API_KEY found, falling back to simulation for ${task.agent}`);
+        return await this.fallbackToSimulation(task);
+      }
+
+      // Load and process prompt template
+      const prompt = await this.loadAndProcessPrompt(task.agent, task);
+      
+      this.log(`🤖 Calling Anthropic API for ${task.agent} agent...`);
+
+      // Call Anthropic API
+      const response = await this.anthropic.messages.create({
+        model: 'claude-3-sonnet-20240229',
+        max_tokens: 4000,
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ]
+      });
+
+      // Extract and parse response
+      const content = response.content[0];
+      if (content.type !== 'text') {
+        throw new Error('Unexpected response format from Anthropic API');
+      }
+
+      // Try to extract JSON from response
+      const jsonMatch = content.text.match(/```json\s*([\s\S]*?)\s*```/);
+      let result: TaskResult;
+
+      if (jsonMatch) {
+        try {
+          result = JSON.parse(jsonMatch[1]);
+        } catch (parseError) {
+          this.log(`⚠️  Failed to parse JSON response, extracting manually...`);
+          result = this.extractResultFromText(content.text, task);
+        }
+      } else {
+        this.log(`⚠️  No JSON block found in response, extracting manually...`);
+        result = this.extractResultFromText(content.text, task);
+      }
+
+      // Validate required fields
+      if (!result.action || !result.details) {
+        this.log(`⚠️  Invalid AI response format, using fallback...`);
+        return await this.fallbackToSimulation(task);
+      }
+
+      // Ensure executed field matches execution mode
+      if (this.executionMode === 'simulate') {
+        result.executed = false;
+      }
+
+      this.log(`✅ AI agent ${task.agent} completed: ${result.action}`);
+      return result;
+
+    } catch (error) {
+      this.log(`❌ AI agent ${task.agent} failed:`, error instanceof Error ? error.message : error);
+      this.log(`🔄 Falling back to simulation for ${task.agent}`);
+      return await this.fallbackToSimulation(task);
+    }
+  }
+
+  /**
+   * Load and process prompt template with variable replacement
+   */
+  private async loadAndProcessPrompt(agent: string, task: AgentTask): Promise<string> {
+    // Agent mapping: orchestrator agent IDs to prompt template filenames
+    const agentMapping: Record<string, string> = {
+      'be': 'backend-expert.md',
+      'fe': 'frontend-expert.md', 
+      'db': 'database-expert.md',
+      'ops': 'infrastructure-expert.md',
+      'test': 'test-expert.md'
+    };
+
+    const templateFile = agentMapping[agent];
+    if (!templateFile) {
+      throw new Error(`No prompt template found for agent: ${agent}`);
+    }
+
+    // Load template file
+    const templatePath = path.join(__dirname, '..', 'prompts', templateFile);
+    if (!fs.existsSync(templatePath)) {
+      throw new Error(`Prompt template not found: ${templatePath}`);
+    }
+
+    let template = fs.readFileSync(templatePath, 'utf8');
+
+    // Replace template variables
+    const context = await this.buildPromptContext(task);
+    
+    for (const [key, value] of Object.entries(context)) {
+      const placeholder = `{{${key}}}`;
+      template = template.replace(new RegExp(placeholder, 'g'), String(value));
+    }
+
+    return template;
+  }
+
+  /**
+   * Build context object for prompt template replacement
+   */
+  private async buildPromptContext(task: AgentTask): Promise<Record<string, any>> {
+    const context: Record<string, any> = {
+      USER_REQUEST: this.session.userRequest,
+      TASK_DESCRIPTION: task.description,
+      EXECUTION_MODE: this.executionMode,
+      TARGET_FILES: (task.files || []).join(', ') || 'None specified'
+    };
+
+    // Add agent memory
+    context.AGENT_MEMORY = await this.loadAgentMemory(task.agent);
+
+    // Add project context
+    context.PROJECT_STRUCTURE = await this.getProjectStructure();
+    context.PACKAGE_SCRIPTS = await this.getPackageScripts();
+
+    // Add agent-specific context
+    if (task.agent === 'be') {
+      context.BACKEND_DIRS = await this.getBackendDirs();
+    } else if (task.agent === 'fe') {
+      context.FRONTEND_FRAMEWORK = await this.getFrontendFramework();
+      context.COMPONENT_DIRS = await this.getComponentDirs();
+    } else if (task.agent === 'db') {
+      context.DATABASE_TYPE = await this.getDatabaseType();
+      context.MIGRATION_DIRS = await this.getMigrationDirs();
+    } else if (task.agent === 'ops') {
+      context.DOCKER_FILES = await this.getDockerFiles();
+      context.WORKFLOW_FILES = await this.getWorkflowFiles();
+    } else if (task.agent === 'test') {
+      context.TEST_FRAMEWORK = await this.getTestFramework();
+      context.TEST_DIRS = await this.getTestDirs();
+    }
+
+    return context;
+  }
+
+  /**
+   * Load recent agent memory
+   */
+  private async loadAgentMemory(agent: string): Promise<string> {
+    try {
+      const memoryFiles: Record<string, string> = {
+        'be': 'docs/agents/be.md',
+        'fe': 'docs/agents/fe.md',
+        'db': 'docs/agents/db.md',
+        'ops': 'docs/agents/ops.md',
+        'test': 'docs/agents/test.md'
+      };
+
+      const memoryFile = memoryFiles[agent];
+      if (!memoryFile) return 'No memory file configured';
+
+      const memoryPath = path.join(process.cwd(), memoryFile);
+      if (!fs.existsSync(memoryPath)) return 'No previous memory available';
+
+      const content = fs.readFileSync(memoryPath, 'utf8');
+      
+      // Get last 3 entries (split by ---)
+      const entries = content.split('---').slice(-3);
+      return entries.join('---').trim() || 'No recent activity';
+      
+    } catch (error) {
+      return 'Memory unavailable';
+    }
+  }
+
+  /**
+   * Context extraction methods
+   */
+  private async getProjectStructure(): Promise<string> {
+    try {
+      const packagePath = path.join(process.cwd(), 'package.json');
+      if (fs.existsSync(packagePath)) {
+        const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+        return `${pkg.name || 'Unknown'} v${pkg.version || '0.0.0'}`;
+      }
+      return 'Non-Node.js project';
+    } catch {
+      return 'Unknown project structure';
+    }
+  }
+
+  private async getPackageScripts(): Promise<string> {
+    try {
+      const packagePath = path.join(process.cwd(), 'package.json');
+      if (fs.existsSync(packagePath)) {
+        const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+        const scripts = pkg.scripts || {};
+        return Object.entries(scripts)
+          .map(([name, cmd]) => `${name}: ${cmd}`)
+          .join('\n') || 'No scripts found';
+      }
+      return 'No package.json found';
+    } catch {
+      return 'Error reading package.json';
+    }
+  }
+
+  private async getBackendDirs(): Promise<string> {
+    const dirs = ['src', 'lib', 'server', 'backend', 'api', 'controllers', 'routes'];
+    const found = dirs.filter(dir => fs.existsSync(path.join(process.cwd(), dir)));
+    return found.join(', ') || 'None detected';
+  }
+
+  private async getFrontendFramework(): Promise<string> {
+    try {
+      const packagePath = path.join(process.cwd(), 'package.json');
+      if (fs.existsSync(packagePath)) {
+        const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        
+        if (deps.next) return 'Next.js';
+        if (deps.react) return 'React';
+        if (deps.vue) return 'Vue.js';
+        if (deps.angular) return 'Angular';
+      }
+      return 'Unknown';
+    } catch {
+      return 'Unknown';
+    }
+  }
+
+  private async getComponentDirs(): Promise<string> {
+    const dirs = ['components', 'src/components', 'app/components'];
+    const found = dirs.filter(dir => fs.existsSync(path.join(process.cwd(), dir)));
+    return found.join(', ') || 'None detected';
+  }
+
+  private async getDatabaseType(): Promise<string> {
+    try {
+      const packagePath = path.join(process.cwd(), 'package.json');
+      if (fs.existsSync(packagePath)) {
+        const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        
+        if (deps.pg || deps.postgres) return 'PostgreSQL';
+        if (deps.mysql || deps.mysql2) return 'MySQL';
+        if (deps.prisma) return 'Prisma';
+      }
+      return 'Unknown';
+    } catch {
+      return 'Unknown';
+    }
+  }
+
+  private async getMigrationDirs(): Promise<string> {
+    const dirs = ['migrations', 'prisma/migrations', 'database/migrations'];
+    const found = dirs.filter(dir => fs.existsSync(path.join(process.cwd(), dir)));
+    return found.join(', ') || 'None found';
+  }
+
+  private async getDockerFiles(): Promise<string> {
+    const files = ['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml'];
+    const found = files.filter(file => fs.existsSync(path.join(process.cwd(), file)));
+    return found.join(', ') || 'None found';
+  }
+
+  private async getWorkflowFiles(): Promise<string> {
+    const workflowDir = path.join(process.cwd(), '.github/workflows');
+    if (fs.existsSync(workflowDir)) {
+      const files = fs.readdirSync(workflowDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+      return files.join(', ') || 'None found';
+    }
+    return 'None found';
+  }
+
+  private async getTestFramework(): Promise<string> {
+    try {
+      const packagePath = path.join(process.cwd(), 'package.json');
+      if (fs.existsSync(packagePath)) {
+        const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+        
+        if (deps.jest) return 'Jest';
+        if (deps.vitest) return 'Vitest';
+        if (deps.mocha) return 'Mocha';
+      }
+      return 'Unknown';
+    } catch {
+      return 'Unknown';
+    }
+  }
+
+  private async getTestDirs(): Promise<string> {
+    const dirs = ['test', 'tests', '__tests__', 'spec'];
+    const found = dirs.filter(dir => fs.existsSync(path.join(process.cwd(), dir)));
+    return found.join(', ') || 'None found';
+  }
+
+  /**
+   * Extract TaskResult from AI text response when JSON parsing fails
+   */
+  private extractResultFromText(text: string, task: AgentTask): TaskResult {
+    // Basic extraction - look for key patterns in the text
+    const actionMatch = text.match(/action[:\s]*(.+?)(?:\n|$)/i);
+    const detailsMatch = text.match(/details[:\s]*([\s\S]*?)(?:\n\n|\n[A-Z]|$)/i);
+    
+    return {
+      action: actionMatch?.[1]?.trim() || `${task.agent.toUpperCase()} analysis completed`,
+      details: detailsMatch?.[1]?.trim() || 'AI agent provided analysis but response format was unclear',
+      executed: false,
+      recommendations: ['Review AI agent response for detailed recommendations'],
+      next_step: 'Manual review of AI analysis recommended'
+    };
+  }
+
+  /**
+   * Fallback to simulation when AI agent fails
+   */
+  private async fallbackToSimulation(task: AgentTask): Promise<TaskResult> {
+    this.log(`🎭 Using simulation fallback for ${task.agent} agent`);
+    
+    switch (task.agent) {
+      case 'db':
+        return await this.executeDatabaseTask(task);
+      case 'be':
+        return await this.executeBackendTask(task);
+      case 'fe':
+        return await this.executeFrontendTask(task);
+      case 'ops':
+        return await this.executeInfrastructureTask(task);
+      case 'test':
+        return await this.executeTestTask(task);
+      default:
+        return {
+          action: 'Agent analysis completed',
+          details: 'Fallback simulation executed',
+          executed: false,
+          recommendations: ['Configure ANTHROPIC_API_KEY for AI agent capabilities']
+        };
     }
   }
 
@@ -519,7 +870,7 @@ Tasks will be executed in sequence, with each specialist agent handling their do
           const process = spawn(cmd, args, { stdio: 'pipe' });
           
           let output = '';
-          process.stdout.on('data', (data: Buffer) => {
+          process.stdout.on('data', (data) => {
             output += data.toString();
           });
           
@@ -571,7 +922,7 @@ Tasks will be executed in sequence, with each specialist agent handling their do
             file.includes('service') ||
             file.includes('api')
           )
-        ).map(file => path.join(dir, file)));
+        ).map(file => path.join(dir, file as string)));
       }
     }
     
@@ -607,7 +958,7 @@ Tasks will be executed in sequence, with each specialist agent handling their do
             file.endsWith('.vue') ||
             file.includes('component')
           )
-        ).map(file => path.join(dir, file)));
+        ).map(file => path.join(dir, file as string)));
       }
     }
     
@@ -673,7 +1024,7 @@ Tasks will be executed in sequence, with each specialist agent handling their do
       const files = fs.readdirSync(dir, { recursive: true });
       foundTests.push(...files.filter(file => 
         typeof file === 'string' && testPatterns.some(pattern => file.includes(pattern))
-      ).map(file => path.join(dir, file)));
+      ).map(file => path.join(dir, file as string)));
     };
     
     searchDir('src');
@@ -700,7 +1051,7 @@ Tasks will be executed in sequence, with each specialist agent handling their do
           const process = spawn(cmd, args, { stdio: 'pipe' });
           
           let output = '';
-          process.stdout.on('data', (data: Buffer) => {
+          process.stdout.on('data', (data) => {
             output += data.toString();
           });
           
